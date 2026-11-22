@@ -1,0 +1,3 @@
+gradio
+edge-tts
+imageio-ffmpeg
