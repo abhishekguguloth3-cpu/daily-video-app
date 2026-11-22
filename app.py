@@ -1,18 +1,47 @@
 import gradio as gr
 import subprocess
 import os
+import re
 import time
-import urllib.parse
 import requests
 import imageio_ffmpeg
 
 FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
 
-def create_fallback_image(img_path):
+STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "in", "on", "at", "to", "for",
+    "of", "with", "and", "or", "but", "over", "under", "every", "this", "that",
+    "you", "your", "it", "its", "as", "by", "from", "into", "new", "brings", "build"
+}
+
+def extract_keywords(sentence):
+    words = re.findall(r"[a-zA-Z]+", sentence.lower())
+    keywords = [w for w in words if w not in STOPWORDS and len(w) > 2]
+    return ",".join(keywords[:3]) if keywords else "nature,landscape"
+
+def download_scene_image(sentence, img_path, index):
+    tags = extract_keywords(sentence)
+    urls = [
+        f"https://loremflickr.com{tags}?lock={index + 10}",
+        f"https://picsum.photos{index + 50}/1280/720"
+    ]
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
+            if resp.status_code == 200 and len(resp.content) > 10000:
+                with open(img_path, "wb") as f:
+                    f.write(resp.content)
+                return True
+        except Exception:
+            continue
+
     subprocess.run([
         FFMPEG_EXE, "-y", "-f", "lavfi", "-i", "color=c=0x1e293b:s=1280x720:d=1",
         "-frames:v", "1", img_path
     ], check=True)
+    return False
 
 def generate_text_to_video(script_text, voice_choice):
     if not script_text or not script_text.strip():
@@ -23,20 +52,17 @@ def generate_text_to_video(script_text, voice_choice):
     final_video = "temp/final_text_to_video.mp4"
 
     # 1. Generate AI Voiceover
-    try:
-        subprocess.run([
-            "edge-tts", "--voice", voice_choice,
-            "--text", script_text.strip(), "--write-media", audio_path
-        ], check=True)
-    except Exception as e:
-        raise gr.Error(f"Voiceover error: {str(e)}")
+    subprocess.run([
+        "edge-tts", "--voice", voice_choice,
+        "--text", script_text.strip(), "--write-media", audio_path
+    ], check=True)
 
     # 2. Measure exact voiceover length
     probe = subprocess.run(
         [FFMPEG_EXE, "-i", audio_path],
         stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True
     )
-    duration = 15.0
+    duration = 10.0
     for line in probe.stderr.splitlines():
         if "Duration:" in line:
             after_dur = line.split("Duration:", 1)[1]
@@ -45,12 +71,11 @@ def generate_text_to_video(script_text, voice_choice):
             duration = int(h) * 3600 + int(m) * 60 + float(s)
             break
 
-    # 3. Split script into scenes & generate visuals safely
-    sentences = [s.strip() for s in script_text.replace("\n", " ").split(".") if len(s.strip()) > 5]
+    # 3. Split script into scenes & fetch matching HD photos
+    sentences = [s.strip() for s in script_text.replace("\n", " ").split(".") if len(s.strip()) > 4]
     if not sentences:
         sentences = [script_text.strip()]
 
-    # Cap at 10 scenes so Render free CPU never runs out of memory or times out
     sentences = sentences[:10]
     scene_duration = max(3.0, duration / len(sentences))
     clip_paths = []
@@ -59,32 +84,18 @@ def generate_text_to_video(script_text, voice_choice):
         img_path = f"temp/scene_{i:02d}.jpg"
         clip_path = f"temp/clip_{i:02d}.mp4"
 
-        prompt = urllib.parse.quote(f"cinematic realistic photography, {sentence}, 4k, natural lighting")
-        img_url = f"https://pollinations.ai{prompt}?width=1280&height=720&nologo=true&seed={i+101}"
+        download_scene_image(sentence, img_path, i)
 
-        got_valid_image = False
-        try:
-            resp = requests.get(img_url, timeout=30)
-            content_type = resp.headers.get("Content-Type", "")
-            if resp.status_code == 200 and "image" in content_type and len(resp.content) > 5000:
-                with open(img_path, "wb") as f:
-                    f.write(resp.content)
-                got_valid_image = True
-        except Exception:
-            pass
-
-        if not got_valid_image:
-            create_fallback_image(img_path)
-
-        # Fast scale + subtle zoom that uses low RAM on Render Free tier
+        # Smooth Ken Burns slow zoom effect on each photo
+        frames = int(scene_duration * 24)
         subprocess.run([
             FFMPEG_EXE, "-y", "-loop", "1", "-i", img_path,
-            "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            "-vf", f"scale=1600:900,zoompan=z='min(zoom+0.0008,1.12)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720",
             "-c:v", "libx264", "-preset", "ultrafast", "-t", f"{scene_duration:.2f}",
             "-pix_fmt", "yuv420p", "-r", "24", clip_path
         ], check=True)
         clip_paths.append(clip_path)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     # 4. Stitch all scenes together
     list_file = "temp/scenes.txt"
@@ -122,7 +133,7 @@ app = gr.Interface(
     ],
     outputs=gr.Video(label="3. Download Your Final Video"),
     title="AI Text-to-Video Generator",
-    description="Enter your script, click Submit, and download a complete realistic video with voiceover.",
+    description="Enter your script, click Submit, and download a complete video with real visuals and AI voiceover.",
     flagging_mode="never"
 )
 
