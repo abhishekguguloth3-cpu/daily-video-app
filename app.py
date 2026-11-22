@@ -21,7 +21,7 @@ def generate_text_to_video(script_text, voice_choice):
         "--text", script_text, "--write-media", audio_path
     ], check=True)
 
-    # Get audio duration using ffmpeg
+    # 2. Measure exact voiceover length
     probe = subprocess.run(
         [FFMPEG_EXE, "-i", audio_path],
         stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True
@@ -29,12 +29,13 @@ def generate_text_to_video(script_text, voice_choice):
     duration = 15.0
     for line in probe.stderr.splitlines():
         if "Duration:" in line:
-            t = line.split("Duration:")[1].split(",")[0].strip()
+            after_dur = line.split("Duration:", 1)[1]
+            t = after_dur.split(",", 1)[0].strip()
             h, m, s = t.split(":")
             duration = int(h) * 3600 + int(m) * 60 + float(s)
             break
 
-    # 2. Split script into scenes & generate realistic AI visuals automatically
+    # 3. Split script into scenes & generate realistic visuals automatically
     sentences = [s.strip() for s in script_text.replace("\n", " ").split(".") if len(s.strip()) > 5]
     if not sentences:
         sentences = [script_text.strip()]
@@ -46,15 +47,13 @@ def generate_text_to_video(script_text, voice_choice):
         img_path = f"temp/scene_{i:02d}.jpg"
         clip_path = f"temp/clip_{i:02d}.mp4"
 
-        # Generate realistic visual from each sentence
         prompt = urllib.parse.quote(f"cinematic realistic photography, {sentence}, 4k, natural lighting")
         img_url = f"https://pollinations.ai{prompt}?width=1280&height=720&nologo=true&seed={i+42}"
-        
-        resp = requests.get(img_url, timeout=30)
+
+        resp = requests.get(img_url, timeout=45)
         with open(img_path, "wb") as f:
             f.write(resp.content)
 
-        # Turn image into smooth cinematic zooming video clip
         frames = int(scene_duration * 25)
         subprocess.run([
             FFMPEG_EXE, "-y", "-loop", "1", "-i", img_path,
@@ -64,7 +63,7 @@ def generate_text_to_video(script_text, voice_choice):
         ], check=True)
         clip_paths.append(clip_path)
 
-    # 3. Join all generated scenes together
+    # 4. Stitch all scenes together
     list_file = "temp/scenes.txt"
     with open(list_file, "w") as f:
         for c in clip_paths:
@@ -76,7 +75,7 @@ def generate_text_to_video(script_text, voice_choice):
         "-c:v", "copy", merged_video
     ], check=True)
 
-    # 4. Combine visuals + AI voiceover into final MP4
+    # 5. Combine visuals + AI voiceover into final downloadable MP4
     subprocess.run([
         FFMPEG_EXE, "-y", "-i", merged_video, "-i", audio_path,
         "-c:v", "copy", "-c:a", "aac", "-shortest", final_video
@@ -89,7 +88,7 @@ app = gr.Interface(
     inputs=[
         gr.Textbox(
             lines=6,
-            placeholder="Type your story or script here. Each sentence automatically becomes a realistic video scene!",
+            placeholder="Type your script here. Each sentence ending with a period (.) becomes a realistic video scene!",
             label="1. Enter Your Script (Text-to-Video)"
         ),
         gr.Dropdown(
@@ -98,16 +97,12 @@ app = gr.Interface(
             label="2. Choose AI Voice"
         )
     ],
-    outputs=gr.Video(label="3. Your Generated Video (Click Top-Right Icon to Download)"),
+    outputs=gr.Video(label="3. Download Your Final Video"),
     title="AI Text-to-Video Generator",
-    description="Type your text, click Submit, and get a complete realistic video with voiceover—no uploads needed."
+    description="Enter your script, click Submit, and download a complete realistic video with voiceover."
 )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
     app.launch(server_name="0.0.0.0", server_port=port)
 
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 7860))
-    app.launch(server_name="0.0.0.0", server_port=port)
